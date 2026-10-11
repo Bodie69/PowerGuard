@@ -78,14 +78,14 @@ class DashboardCustomizeSheet extends StatelessWidget {
               ),
               const SizedBox(height: 24),
               Text(
-                'Channel order',
+                'Computer order',
                 style: Theme.of(
                   context,
                 ).textTheme.labelLarge?.copyWith(color: Colors.grey[600]),
               ),
               const SizedBox(height: 4),
               Text(
-                'Drag to reorder how channels appear on the dashboard.',
+                'Drag to reorder how computers appear on the dashboard.',
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
                   color: Colors.grey[500],
                 ),
@@ -117,7 +117,7 @@ class DashboardCustomizeSheet extends StatelessWidget {
               ),
               const SizedBox(height: 4),
               Text(
-                'Choose which stats show on each channel card.',
+                'Choose which stats show on each computer card.',
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
                   color: Colors.grey[500],
                 ),
@@ -165,7 +165,7 @@ class _ChannelOrderList extends StatelessWidget {
           margin: const EdgeInsets.symmetric(vertical: 4),
           child: ListTile(
             leading: const Icon(Icons.drag_indicator),
-            title: Text('Channel $channel'),
+            title: Text('Computer $channel'),
             trailing: ReorderableDragStartListener(
               index: index,
               child: const Icon(Icons.swap_vert),
@@ -201,7 +201,7 @@ class _ChannelDisplayModeList extends StatelessWidget {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text('Channel $channel'),
+                    Text('Computer $channel'),
                     SegmentedButton<ChannelDisplayMode>(
                       style: const ButtonStyle(
                         visualDensity: VisualDensity.compact,

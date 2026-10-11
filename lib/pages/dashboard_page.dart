@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../models/channel_reading.dart';
 import '../models/device.dart';
 import '../services/dashboard_layout_controller.dart';
+import '../services/device_online_debouncer.dart';
 import '../services/supabase_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/channel_card.dart';
@@ -20,8 +23,6 @@ class DashboardPage extends StatelessWidget {
     final devices = context.watch<List<Device>>();
     final device = devices.isEmpty ? null : devices.first;
     final layout = context.watch<DashboardLayoutController>();
-
-    final isOffline = device != null && !device.isOnline;
 
     void showDetails(ChannelReading reading) {
       Navigator.of(context).push(
@@ -61,31 +62,6 @@ class DashboardPage extends StatelessWidget {
       }
     }
 
-    final List<ChannelReading> channels;
-    if (rawChannels.isEmpty) {
-      channels = List.generate(4, (i) {
-        final channelNum = i + 1;
-        return ChannelReading(
-          id: 'placeholder-$channelNum',
-          deviceId: device?.id ?? 'no-device',
-          channelNumber: channelNum,
-          voltage: 0.0,
-          current: 0.0,
-          power: 0.0,
-          energy: 0.0,
-          frequency: 0.0,
-          powerFactor: 1.0,
-          breakerStatus: 'OFF',
-          updatedAt: DateTime.now(),
-        );
-      });
-    } else {
-      channels = layout.sortByChannelOrder(
-        rawChannels,
-        (c) => c.channelNumber,
-      );
-    }
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('Dashboard'),
@@ -103,22 +79,7 @@ class DashboardPage extends StatelessWidget {
       ),
       body: Column(
         children: [
-          if (isOffline)
-            Container(
-              width: double.infinity,
-              color: AppColors.warning.withValues(alpha: 0.9),
-              padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
-              child: const Row(
-                children: [
-                  Icon(Icons.wifi_off, size: 16, color: Colors.white),
-                  SizedBox(width: 8),
-                  Text(
-                    'Device is offline. Data may be stale.',
-                    style: TextStyle(color: Colors.white, fontSize: 12),
-                  ),
-                ],
-              ),
-            ),
+          _OfflineBanner(device: device),
           Expanded(
             child: RefreshIndicator(
               onRefresh: () async {
@@ -126,12 +87,108 @@ class DashboardPage extends StatelessWidget {
                 // to make the user feel like something happened.
                 await Future.delayed(const Duration(seconds: 1));
               },
-              child: _buildLayout(
-                  context, channels, layout, turnOff, showDetails),
+              child: _ChannelGrid(
+                rawChannels: rawChannels,
+                device: device,
+                layout: layout,
+                onOff: turnOff,
+                onDetails: showDetails,
+              ),
             ),
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Builds the channel cards from live data. Device.isOnline depends on
+/// wall-clock time, not just on new readings arriving, so this re-checks on
+/// a timer to zero out the meter values once the device goes stale --
+/// otherwise a channel would keep showing its last (now meaningless)
+/// reading until the next Supabase realtime event, same as ConnectionIndicator.
+class _ChannelGrid extends StatefulWidget {
+  const _ChannelGrid({
+    required this.rawChannels,
+    required this.device,
+    required this.layout,
+    required this.onOff,
+    required this.onDetails,
+  });
+
+  final List<ChannelReading> rawChannels;
+  final Device? device;
+  final DashboardLayoutController layout;
+  final Future<void> Function(ChannelReading) onOff;
+  final void Function(ChannelReading) onDetails;
+
+  @override
+  State<_ChannelGrid> createState() => _ChannelGridState();
+}
+
+class _ChannelGridState extends State<_ChannelGrid> {
+  Timer? _ticker;
+  final _onlineDebouncer = DeviceOnlineDebouncer();
+
+  @override
+  void initState() {
+    super.initState();
+    _ticker = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final device = widget.device;
+    final layout = widget.layout;
+    final online = _onlineDebouncer.update(device);
+
+    final List<ChannelReading> channels;
+    if (widget.rawChannels.isEmpty) {
+      channels = List.generate(4, (i) {
+        final channelNum = i + 1;
+        return ChannelReading(
+          id: 'placeholder-$channelNum',
+          deviceId: device?.id ?? 'no-device',
+          channelNumber: channelNum,
+          voltage: 0.0,
+          current: 0.0,
+          power: 0.0,
+          energy: 0.0,
+          frequency: 0.0,
+          powerFactor: 1.0,
+          breakerStatus: 'OFF',
+          updatedAt: DateTime.now(),
+        );
+      });
+    } else {
+      final sorted = layout.sortByChannelOrder(
+        widget.rawChannels,
+        (c) => c.channelNumber,
+      );
+      // Zero a channel's live meter values whenever the whole device is
+      // offline OR that channel's own breaker is OFF -- a computer that's
+      // off shouldn't show stale/leftover voltage, current, etc. just
+      // because the ESP32 itself is still online.
+      channels = sorted
+          .map((c) => (!online || c.isOff) ? c.zeroed() : c)
+          .toList();
+    }
+
+    return _buildLayout(
+      context,
+      channels,
+      layout,
+      widget.onOff,
+      widget.onDetails,
+      online: online,
     );
   }
 
@@ -140,8 +197,9 @@ class DashboardPage extends StatelessWidget {
     List<ChannelReading> channels,
     DashboardLayoutController layout,
     Future<void> Function(ChannelReading) onOff,
-    void Function(ChannelReading) onDetails,
-  ) {
+    void Function(ChannelReading) onDetails, {
+    required bool online,
+  }) {
     switch (layout.viewMode) {
       case DashboardViewMode.relative:
         return ListView.builder(
@@ -156,6 +214,7 @@ class DashboardPage extends StatelessWidget {
                 reading.channelNumber,
                 AppColors.primary,
               ),
+              isOnline: online,
               visibleMetrics: layout.visibleMetrics,
               onOff: () => onOff(reading),
               onDetails: () => onDetails(reading),
@@ -183,6 +242,7 @@ class DashboardPage extends StatelessWidget {
                 reading.channelNumber,
                 AppColors.primary,
               ),
+              isOnline: online,
               visibleMetrics: layout.visibleMetrics,
               onOff: () => onOff(reading),
               onDetails: () => onDetails(reading),
@@ -206,6 +266,7 @@ class DashboardPage extends StatelessWidget {
                     channels[i].channelNumber,
                     AppColors.primary,
                   ),
+                  isOnline: online,
                   visibleMetrics: layout.visibleMetrics,
                   onOff: () => onOff(channels[i]),
                   onDetails: () => onDetails(channels[i]),
@@ -216,5 +277,62 @@ class DashboardPage extends StatelessWidget {
           ],
         );
     }
+  }
+}
+
+/// Device.isOnline depends on wall-clock time (how long since lastSeen), not
+/// just on new data arriving, so this re-checks on a timer -- otherwise the
+/// banner would only update on the next Supabase realtime event, same as
+/// ConnectionIndicator. Uses [DeviceOnlineDebouncer] so a transient offline
+/// flip doesn't flash the banner on and off.
+class _OfflineBanner extends StatefulWidget {
+  const _OfflineBanner({required this.device});
+
+  final Device? device;
+
+  @override
+  State<_OfflineBanner> createState() => _OfflineBannerState();
+}
+
+class _OfflineBannerState extends State<_OfflineBanner> {
+  Timer? _ticker;
+  final _onlineDebouncer = DeviceOnlineDebouncer();
+
+  @override
+  void initState() {
+    super.initState();
+    _ticker = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final device = widget.device;
+    if (device == null || _onlineDebouncer.update(device)) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      width: double.infinity,
+      color: AppColors.warning.withValues(alpha: 0.9),
+      padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
+      child: const Row(
+        children: [
+          Icon(Icons.wifi_off, size: 16, color: Colors.white),
+          SizedBox(width: 8),
+          Text(
+            'Device is offline. Data may be stale.',
+            style: TextStyle(color: Colors.white, fontSize: 12),
+          ),
+        ],
+      ),
+    );
   }
 }

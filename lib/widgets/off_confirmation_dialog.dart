@@ -10,10 +10,10 @@ Future<bool> showOffConfirmationDialog(
   final result = await showDialog<bool>(
     context: context,
     builder: (context) => AlertDialog(
-      title: const Text('Turn Off Channel'),
+      title: const Text('Turn Off Computer'),
       content: Text(
-        'Are you sure you want to turn off this channel? '
-        'The breaker must be manually reset.\n\nChannel $channel',
+        'Are you sure you want to turn off this computer? '
+        'The breaker must be manually reset.\n\nComputer $channel',
       ),
       actions: [
         TextButton(

@@ -3,6 +3,7 @@ import 'dart:developer' as developer;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:provider/provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -15,6 +16,7 @@ import 'pages/login_page.dart';
 import 'pages/root_shell.dart';
 import 'pages/welcome_page.dart';
 import 'services/dashboard_layout_controller.dart';
+import 'services/foreground_alarm_service.dart';
 import 'services/realtime_alert_service.dart';
 import 'services/supabase_service.dart';
 import 'services/theme_controller.dart';
@@ -22,7 +24,8 @@ import 'theme/app_theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
+  FlutterForegroundTask.initCommunicationPort();
+
   await dotenv.load(fileName: '.env');
 
   if (!Config.isConfigured) {
@@ -154,9 +157,15 @@ class _AuthGateState extends State<_AuthGate> {
   void initState() {
     super.initState();
     final service = context.read<SupabaseService>();
+    if (service.isAuthenticated) {
+      ForegroundAlarmService.start();
+    }
     _authSubscription = service.authStateChanges.listen((state) {
-      if (state.event == AuthChangeEvent.signedOut && mounted) {
-        setState(() => _pastWelcome = false);
+      if (state.event == AuthChangeEvent.signedOut) {
+        ForegroundAlarmService.stop();
+        if (mounted) setState(() => _pastWelcome = false);
+      } else if (state.event == AuthChangeEvent.signedIn) {
+        ForegroundAlarmService.start();
       }
     });
   }

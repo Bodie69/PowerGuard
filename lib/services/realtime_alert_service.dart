@@ -39,7 +39,7 @@ class RealtimeAlertService {
             final reason = row['reason'] as String? ?? 'Off';
             _controller.add(
               AppAlert(
-                'Channel $channel turned off: $reason',
+                'Computer $channel turned off: $reason',
                 reason == 'Overcurrent'
                     ? AppAlertLevel.danger
                     : AppAlertLevel.warning,

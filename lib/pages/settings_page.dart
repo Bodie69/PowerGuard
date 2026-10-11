@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import '../models/device.dart';
+import '../services/device_online_debouncer.dart';
 import '../services/supabase_service.dart';
 import '../services/theme_controller.dart';
 import '../theme/app_theme.dart';
@@ -152,37 +155,7 @@ class SettingsPage extends StatelessWidget {
               ],
             ),
           ),
-          StandardCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      device?.deviceName ?? 'No device registered',
-                      style: theme.textTheme.titleMedium,
-                    ),
-                    if (device != null)
-                      StatusChip(
-                        label: device.isOnline ? 'ONLINE' : 'OFFLINE',
-                        color: device.isOnline ? AppColors.success : AppColors.danger,
-                      ),
-                  ],
-                ),
-                if (device != null) ...[
-                  const SizedBox(height: DesignTokens.spacingMedium),
-                  _InfoRow('Firmware version', device.firmwareVersion ?? 'Unknown'),
-                  _InfoRow(
-                    'Last seen',
-                    device.lastSeen == null
-                        ? 'Never'
-                        : dateFormat.format(device.lastSeen!.toLocal()),
-                  ),
-                ],
-              ],
-            ),
-          ),
+          _DeviceStatusCard(device: device, dateFormat: dateFormat),
           StandardCard(
             padding: EdgeInsets.zero,
             child: ListTile(
@@ -206,6 +179,80 @@ class SettingsPage extends StatelessWidget {
             ),
           ),
           const SizedBox(height: DesignTokens.spacingXLarge),
+        ],
+      ),
+    );
+  }
+}
+
+/// Device.isOnline depends on wall-clock time (how long since lastSeen), not
+/// just on new data arriving, so this re-checks on a timer -- otherwise the
+/// status chip would only update on the next Supabase realtime event, same
+/// as ConnectionIndicator and the dashboard's offline banner. Uses
+/// [DeviceOnlineDebouncer] so a transient offline flip doesn't flash the
+/// chip on and off.
+class _DeviceStatusCard extends StatefulWidget {
+  const _DeviceStatusCard({required this.device, required this.dateFormat});
+
+  final Device? device;
+  final DateFormat dateFormat;
+
+  @override
+  State<_DeviceStatusCard> createState() => _DeviceStatusCardState();
+}
+
+class _DeviceStatusCardState extends State<_DeviceStatusCard> {
+  Timer? _ticker;
+  final _onlineDebouncer = DeviceOnlineDebouncer();
+
+  @override
+  void initState() {
+    super.initState();
+    _ticker = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final device = widget.device;
+    final theme = Theme.of(context);
+    final online = _onlineDebouncer.update(device);
+
+    return StandardCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                device?.deviceName ?? 'No device registered',
+                style: theme.textTheme.titleMedium,
+              ),
+              if (device != null)
+                StatusChip(
+                  label: online ? 'ONLINE' : 'OFFLINE',
+                  color: online ? AppColors.success : AppColors.danger,
+                ),
+            ],
+          ),
+          if (device != null) ...[
+            const SizedBox(height: DesignTokens.spacingMedium),
+            _InfoRow('Firmware version', device.firmwareVersion ?? 'Unknown'),
+            _InfoRow(
+              'Last seen',
+              device.lastSeen == null
+                  ? 'Never'
+                  : widget.dateFormat.format(device.lastSeen!.toLocal()),
+            ),
+          ],
         ],
       ),
     );

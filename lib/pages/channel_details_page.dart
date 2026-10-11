@@ -1,8 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
+import '../models/channel_history_entry.dart';
+import '../models/channel_monthly_energy.dart';
 import '../models/channel_reading.dart';
+import '../models/device.dart';
 import '../models/off_log.dart';
+import '../services/device_online_debouncer.dart';
 import '../services/supabase_service.dart';
 import '../theme/app_theme.dart';
 import '../theme/design_tokens.dart';
@@ -25,13 +32,49 @@ class ChannelDetailsPage extends StatefulWidget {
 }
 
 class _ChannelDetailsPageState extends State<ChannelDetailsPage> {
-  final List<double> _history = [];
-  static const int _maxHistory = 50;
+  List<ChannelHistoryEntry> _historyPoints = [];
+  List<ChannelMonthlyEnergy> _monthlyHistory = [];
+  double? _monthStartEnergy;
+  StreamSubscription<List<ChannelHistoryEntry>>? _historySub;
+  StreamSubscription<List<ChannelMonthlyEnergy>>? _monthlyHistorySub;
+  Timer? _ticker;
+  final _onlineDebouncer = DeviceOnlineDebouncer();
+
+  @override
+  void initState() {
+    super.initState();
+    final service = context.read<SupabaseService>();
+    _historySub = service.channelHistoryStream(widget.channelNumber).listen((points) {
+      if (mounted) setState(() => _historyPoints = points);
+    });
+    _monthlyHistorySub = service.monthlyEnergyStream(widget.channelNumber).listen((months) {
+      if (mounted) setState(() => _monthlyHistory = months);
+    });
+    service.monthStartEnergy(widget.channelNumber).then((value) {
+      if (mounted) setState(() => _monthStartEnergy = value);
+    });
+    // Device.isOnline depends on wall-clock time, not just on new readings
+    // arriving, so re-check on a timer to zero the meter once the device
+    // goes stale -- same as the dashboard's channel grid. DeviceOnlineDebouncer
+    // needs this to tick faster than isOnline's own staleness window to
+    // confirm an offline flip promptly.
+    _ticker = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _historySub?.cancel();
+    _monthlyHistorySub?.cancel();
+    _ticker?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final readings = context.watch<List<ChannelReading>>();
-    final reading = readings.firstWhere(
+    final rawReading = readings.firstWhere(
       (r) => r.channelNumber == widget.channelNumber,
       orElse: () => ChannelReading(
         id: 'placeholder-${widget.channelNumber}',
@@ -48,23 +91,36 @@ class _ChannelDetailsPageState extends State<ChannelDetailsPage> {
       ),
     );
 
+    // Single-device app for now, same assumption channelsStream() makes.
+    final devices = context.watch<List<Device>>();
+    final isOnline = _onlineDebouncer.update(devices.isEmpty ? null : devices.first);
+    // Same as the dashboard's channel grid: zero the meter values whenever
+    // the device is offline OR this channel's own breaker is OFF, so a
+    // computer that's off never shows stale/leftover live values just
+    // because the ESP32 itself is still online.
+    final reading =
+        (!isOnline || rawReading.isOff) ? rawReading.zeroed() : rawReading;
+
     final offLogs = context.watch<List<OffLog>>().where(
       (l) => l.channel == widget.channelNumber,
     ).toList();
 
-    // Update history for sparkline
-    if (_history.isEmpty || _history.last != reading.power) {
-      _history.add(reading.power);
-      if (_history.length > _maxHistory) {
-        _history.removeAt(0);
-      }
-    }
+    // energy is the PZEM's cumulative kWh register, so this month's usage
+    // is just how much it's climbed since the first reading this month.
+    final latestEnergy =
+        _historyPoints.isEmpty ? null : _historyPoints.last.energy;
+    final rawMonthKwh = (latestEnergy != null && _monthStartEnergy != null)
+        ? latestEnergy - _monthStartEnergy!
+        : null;
+    // A negative delta means the PZEM's energy register was reset
+    // mid-month (e.g. power-cycled) -- the baseline no longer applies.
+    final monthKwh = (rawMonthKwh != null && rawMonthKwh >= 0) ? rawMonthKwh : null;
 
     final isOff = reading.isOff;
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('Channel ${widget.channelNumber} Details'),
+        title: Text('Computer ${widget.channelNumber} Details'),
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
@@ -77,11 +133,13 @@ class _ChannelDetailsPageState extends State<ChannelDetailsPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            _buildHeader(context, reading),
+            _buildHeader(context, reading, isOnline),
             const SizedBox(height: DesignTokens.spacingLarge),
             _buildMainGauges(context, reading),
             const SizedBox(height: DesignTokens.spacingLarge),
-            _buildTrendSection(context),
+            _buildTrendSection(context, _historyPoints, monthKwh),
+            const SizedBox(height: DesignTokens.spacingLarge),
+            _buildMonthlyHistory(context, _monthlyHistory),
             const SizedBox(height: DesignTokens.spacingLarge),
             _buildTechnicalSpecs(context, reading),
             const SizedBox(height: DesignTokens.spacingLarge),
@@ -105,8 +163,15 @@ class _ChannelDetailsPageState extends State<ChannelDetailsPage> {
     );
   }
 
-  Widget _buildHeader(BuildContext context, ChannelReading reading) {
+  Widget _buildHeader(BuildContext context, ChannelReading reading, bool isOnline) {
     final isOff = reading.isOff;
+    // The breaker status is frozen at whatever it last reported once the
+    // device stops checking in, so it can't be trusted as the real status --
+    // show OFFLINE instead, same as the dashboard's channel cards.
+    final statusLabel = !isOnline ? 'OFFLINE' : (isOff ? 'OFF' : 'ON');
+    final statusColor = !isOnline
+        ? AppColors.danger
+        : (isOff ? AppColors.danger : AppColors.success);
     return Row(
       children: [
         Expanded(
@@ -114,9 +179,9 @@ class _ChannelDetailsPageState extends State<ChannelDetailsPage> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                'Status: ${isOff ? "OFF" : "ON"}',
+                'Status: $statusLabel',
                 style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                  color: isOff ? AppColors.danger : AppColors.success,
+                  color: statusColor,
                   fontWeight: FontWeight.bold,
                 ),
               ),
@@ -128,8 +193,8 @@ class _ChannelDetailsPageState extends State<ChannelDetailsPage> {
           ),
         ),
         StatusChip(
-          label: isOff ? 'OFF' : 'ON',
-          color: isOff ? AppColors.danger : AppColors.success,
+          label: statusLabel,
+          color: statusColor,
         ),
       ],
     );
@@ -173,28 +238,84 @@ class _ChannelDetailsPageState extends State<ChannelDetailsPage> {
     );
   }
 
-  Widget _buildTrendSection(BuildContext context) {
+  Widget _buildTrendSection(
+    BuildContext context,
+    List<ChannelHistoryEntry> historyPoints,
+    double? monthKwh,
+  ) {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(DesignTokens.spacingMedium),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'Power Consumption Trend (W)',
-              style: Theme.of(context).textTheme.titleMedium,
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Expanded(
+                  child: Text(
+                    'Power Consumption Trend (W)',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
+                const SizedBox(width: DesignTokens.spacingSmall),
+                Text(
+                  monthKwh == null
+                      ? 'This month: —'
+                      : 'This month: ${monthKwh.toStringAsFixed(2)} kWh',
+                  style: Theme.of(context).textTheme.bodySmall,
+                  textAlign: TextAlign.right,
+                ),
+              ],
             ),
             const SizedBox(height: DesignTokens.spacingMedium),
             SizedBox(
               height: 120,
               child: SparklineChart(
-                data: _history,
+                data: historyPoints.map((p) => p.power).toList(),
                 color: AppColors.primary,
               ),
             ),
           ],
         ),
       ),
+    );
+  }
+
+  /// Past months' totals, archived server-side once each month completes
+  /// (see the archive-monthly-energy cron job) so they're preserved even
+  /// after channel_history's raw rows for that month get pruned.
+  Widget _buildMonthlyHistory(BuildContext context, List<ChannelMonthlyEnergy> months) {
+    final monthFormat = DateFormat('MMMM yyyy');
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Monthly Consumption History',
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
+        const SizedBox(height: 8),
+        if (months.isEmpty)
+          const Padding(
+            padding: EdgeInsets.all(16.0),
+            child: Text(
+              'No monthly totals archived yet -- check back after this '
+              'month ends.',
+            ),
+          )
+        else
+          ...months.map((entry) => Card(
+            margin: const EdgeInsets.symmetric(vertical: 4),
+            child: ListTile(
+              leading: const Icon(Icons.calendar_month, color: AppColors.primary),
+              title: Text(monthFormat.format(entry.month)),
+              trailing: Text(
+                '${entry.consumedKwh.toStringAsFixed(2)} kWh',
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
+            ),
+          )),
+      ],
     );
   }
 

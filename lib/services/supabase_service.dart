@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:developer' as developer;
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../models/channel_history_entry.dart';
+import '../models/channel_monthly_energy.dart';
 import '../models/channel_reading.dart';
 import '../models/device.dart';
 import '../models/off_log.dart';
@@ -65,6 +67,76 @@ class SupabaseService {
         .order('channel_number')
         .handleError((e) => developer.log('channelsStream error: ${ErrorMapper.map(e)}', error: e))
         .map((rows) => rows.map(ChannelReading.fromMap).toList());
+  }
+
+  /// Live trend for one channel, newest-first from the DB then reversed so
+  /// callers get it oldest-first (chart order). Single-device app for now,
+  /// same assumption channelsStream()/off_logs already make -- and realtime
+  /// postgres_changes filters only support one column anyway, so this can't
+  /// also filter by device_id.
+  Stream<List<ChannelHistoryEntry>> channelHistoryStream(
+    int channelNumber, {
+    int limit = 100,
+  }) {
+    return _client
+        .from('channel_history')
+        .stream(primaryKey: ['id'])
+        .eq('channel_number', channelNumber)
+        .order('recorded_at', ascending: false)
+        .limit(limit)
+        .handleError((e) =>
+            developer.log('channelHistoryStream error: ${ErrorMapper.map(e)}', error: e))
+        .map((rows) => rows.reversed.map(ChannelHistoryEntry.fromMap).toList());
+  }
+
+  /// One-off lookup of the earliest `energy` reading recorded so far this
+  /// calendar month (UTC), i.e. the baseline `energy` was at when the month
+  /// started. Callers combine this with the latest live reading from
+  /// [channelHistoryStream] to get a live-updating monthly total (`energy`
+  /// is the PZEM's own cumulative kWh register) without re-querying on
+  /// every tick. Returns null if there's no reading yet this month.
+  Future<double?> monthStartEnergy(int channelNumber) async {
+    final now = DateTime.now().toUtc();
+    final monthStart = DateTime.utc(now.year, now.month, 1);
+    try {
+      final row = await _client
+          .from('channel_history')
+          .select('energy')
+          .eq('channel_number', channelNumber)
+          .gte('recorded_at', monthStart.toIso8601String())
+          // Skip rows recorded while the meter wasn't answering (energy and
+          // voltage both 0): as a baseline they'd make the whole register
+          // value look like this month's consumption.
+          .or('voltage.gt.0,energy.gt.0')
+          .order('recorded_at')
+          .limit(1)
+          .maybeSingle();
+      if (row == null) return null;
+      return (row['energy'] as num).toDouble();
+    } catch (e, stack) {
+      developer.log('monthStartEnergy failed: ${ErrorMapper.map(e)}', error: e, stackTrace: stack);
+      return null;
+    }
+  }
+
+  /// Past months' consumption, archived by the `archive-monthly-energy` cron
+  /// job (see supabase/migrations) once each month completes -- unlike
+  /// [channelHistoryStream], this survives channel_history's 3-month
+  /// retention pruning, so it's the source for anything beyond the current
+  /// month.
+  Stream<List<ChannelMonthlyEnergy>> monthlyEnergyStream(
+    int channelNumber, {
+    int limit = 12,
+  }) {
+    return _client
+        .from('channel_monthly_energy')
+        .stream(primaryKey: ['id'])
+        .eq('channel_number', channelNumber)
+        .order('month', ascending: false)
+        .limit(limit)
+        .handleError((e) =>
+            developer.log('monthlyEnergyStream error: ${ErrorMapper.map(e)}', error: e))
+        .map((rows) => rows.map(ChannelMonthlyEnergy.fromMap).toList());
   }
 
   Stream<List<OffSchedule>> schedulesStream() {

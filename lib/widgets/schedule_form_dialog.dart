@@ -57,7 +57,7 @@ class _ScheduleFormDialogState extends State<_ScheduleFormDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Channel'),
+            const Text('Computer'),
             const SizedBox(height: 8),
             SegmentedButton<int>(
               segments: const [

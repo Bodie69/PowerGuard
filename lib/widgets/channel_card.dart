@@ -18,6 +18,7 @@ class ChannelCard extends StatelessWidget {
     this.displayMode = ChannelDisplayMode.digital,
     this.compact = false,
     this.color = AppColors.primary,
+    this.isOnline = true,
     this.visibleMetrics = const {
       'voltage',
       'current',
@@ -34,6 +35,11 @@ class ChannelCard extends StatelessWidget {
   final ChannelDisplayMode displayMode;
   final bool compact;
   final Color color;
+
+  /// Whether the device is actually reporting in right now. When false,
+  /// [reading.breakerStatus] is stale (frozen at whatever it last reported)
+  /// so it can't be trusted as the real status -- show OFFLINE instead.
+  final bool isOnline;
 
   /// Which metric keys (see [kAllChannelMetrics]) to render.
   final Set<String> visibleMetrics;
@@ -80,10 +86,11 @@ class ChannelCard extends StatelessWidget {
         if (visibleMetrics.contains(key)) metrics[key]!,
     ];
 
-    final statusLabel = reading.breakerStatus;
+    final statusLabel = isOnline ? reading.breakerStatus : 'OFFLINE';
     final statusColor = switch (statusLabel) {
       'ON' => AppColors.success,
       'OFF' => AppColors.danger,
+      'OFFLINE' => AppColors.danger,
       _ => Colors.grey,
     };
 
@@ -105,7 +112,7 @@ class ChannelCard extends StatelessWidget {
                   children: [
                     Expanded(
                       child: Text(
-                        'Channel ${reading.channelNumber}',
+                        'Computer ${reading.channelNumber}',
                         style: compact
                             ? Theme.of(context).textTheme.titleSmall
                             : Theme.of(context).textTheme.titleMedium,

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:provider/provider.dart';
 
 import '../services/realtime_alert_service.dart';
@@ -20,6 +21,7 @@ class RootShell extends StatefulWidget {
 class _RootShellState extends State<RootShell> {
   int _index = 0;
   StreamSubscription<AppAlert>? _alertSubscription;
+  bool _overcurrentDialogShowing = false;
 
   static const _pages = [
     DashboardPage(),
@@ -29,12 +31,57 @@ class _RootShellState extends State<RootShell> {
   ];
 
   @override
+  void initState() {
+    super.initState();
+    // The overcurrent watch itself runs in the foreground-service isolate
+    // (OvercurrentTaskHandler) so it keeps working while the app is
+    // backgrounded; this just surfaces it as an in-app dialog when the app
+    // happens to be open.
+    FlutterForegroundTask.addTaskDataCallback(_onTaskData);
+  }
+
+  @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     _alertSubscription ??= context
         .read<RealtimeAlertService>()
         .alerts
         .listen(_showAlert);
+  }
+
+  void _onTaskData(Object data) {
+    if (!mounted) return;
+    if (data is! Map || data['event'] != 'overcurrent') return;
+    if (_overcurrentDialogShowing) return;
+
+    final channel = data['channel'] as int;
+    final current = (data['current'] as num).toDouble();
+    _overcurrentDialogShowing = true;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(
+          Icons.warning_amber_rounded,
+          color: AppColors.danger,
+          size: 40,
+        ),
+        title: const Text('Overcurrent Detected'),
+        content: Text(
+          'Computer $channel is drawing ${current.toStringAsFixed(1)} A, '
+          'above the 1 A safety limit.',
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Acknowledge'),
+          ),
+        ],
+      ),
+    ).then((_) {
+      _overcurrentDialogShowing = false;
+      FlutterForegroundTask.sendDataToTask({'ack': true});
+    });
   }
 
   void _showAlert(AppAlert alert) {
@@ -55,6 +102,7 @@ class _RootShellState extends State<RootShell> {
   @override
   void dispose() {
     _alertSubscription?.cancel();
+    FlutterForegroundTask.removeTaskDataCallback(_onTaskData);
     super.dispose();
   }
 

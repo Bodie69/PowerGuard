@@ -37,7 +37,7 @@ const _channelDisplayModesKey = 'dashboard_channel_display_modes';
 const _channelColorsKey = 'dashboard_channel_colors';
 
 /// Persists the admin's preferred dashboard layout: grid vs list, the order
-/// channel cards appear in, and which metrics show on each card.
+/// computer cards appear in, and which metrics show on each card.
 class DashboardLayoutController extends ChangeNotifier {
   DashboardViewMode _viewMode = DashboardViewMode.relative;
   List<int> _channelOrder = [1, 2, 3, 4];

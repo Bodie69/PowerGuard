@@ -16,10 +16,14 @@ class Device {
   /// The ESP32 only ever writes status: "online" (on boot and on each
   /// heartbeat) -- it has no way to mark itself offline when it drops off
   /// the network. So "online" is only trustworthy if a heartbeat also
-  /// landed recently; firmware sends one every 30s (see
-  /// esp32_firmware/include/config.h kHeartbeatMs), so 3 missed heartbeats means
-  /// it's actually gone.
-  static const _staleAfter = Duration(seconds: 90);
+  /// landed recently. The firmware's cloud task sends one every
+  /// kHeartbeatMs (10s, esp32_firmware/include/config.h); 35s allows a few
+  /// slow or retried requests before calling the device offline. Keep
+  /// kHeartbeatMs well under this. Matches the server-side pg_cron job in
+  /// supabase/migrations/20260907000000_offline_staleness.sql, which also
+  /// flips `status` to 'offline' at this threshold so it's enforced even
+  /// with no client connected.
+  static const _staleAfter = Duration(seconds: 35);
 
   bool get isOnline {
     if (status != 'online' || lastSeen == null) return false;

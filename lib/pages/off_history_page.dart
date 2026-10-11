@@ -33,7 +33,7 @@ class _OffHistoryPageState extends State<OffHistoryPage> {
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             child: Row(
               children: [
-                const Text('Channel:'),
+                const Text('Computer:'),
                 const SizedBox(width: 8),
                 DropdownButton<int?>(
                   value: _channelFilter,
@@ -71,12 +71,14 @@ class _OffHistoryPageState extends State<OffHistoryPage> {
                               log.reason,
                             ).withValues(alpha: 0.15),
                             child: Icon(
-                              Icons.power_off,
+                              log.reason == 'Scheduled Off'
+                                  ? Icons.schedule
+                                  : Icons.power_off,
                               color: _reasonColor(context, log.reason),
                             ),
                           ),
                           title: Text(
-                            'Channel ${log.channel} · ${log.reason}',
+                            'Computer ${log.channel} · ${log.reason}',
                           ),
                           subtitle: Text(
                             '${dateFormat.format(log.timestamp.toLocal())}'
@@ -102,6 +104,8 @@ class _OffHistoryPageState extends State<OffHistoryPage> {
         return AppColors.danger;
       case 'Manual Off':
         return AppColors.warning;
+      case 'Scheduled Off':
+        return AppColors.primary;
       default:
         return Theme.of(context).colorScheme.primary;
     }

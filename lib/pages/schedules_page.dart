@@ -39,7 +39,7 @@ class SchedulesPage extends StatelessWidget {
                   ),
                   child: ListTile(
                     title: Text(
-                      'Channel ${schedule.channel} · ${schedule.formattedTime}',
+                      'Computer ${schedule.channel} · ${schedule.formattedTime}',
                     ),
                     subtitle: Text(schedule.days.join(', ')),
                     leading: Switch(

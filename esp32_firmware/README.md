@@ -9,7 +9,7 @@ spec.
 ## Wiring
 
 - **PZEM-004T x4** share a single UART bus, wired to UART2 (default
-  TX=GPIO27, RX=GPIO14, configurable in `config.h`) so UART0 stays free for
+  TX=GPIO14, RX=GPIO27, configurable in `config.h`) so UART0 stays free for
   the USB/serial console. All 4 meters' TX pins tied together, all 4 RX
   pins tied together. Each meter is given a unique Modbus RTU address (1-4)
   so only one drives the bus at a time when polled — see **Provisioning
@@ -31,6 +31,12 @@ spec.
   yours is active-high; wiring the wrong polarity means the relay is
   energized at boot until firmware runs, which you do not want on a
   breaker-tripping circuit.
+- **20x4 I2C LCD** (PCF8574 backpack): SDA=GPIO21, SCL=GPIO22, VCC=5V,
+  GND=GND (`kLcdSdaPin`/`kLcdSclPin`/`kLcdI2cAddress` in `config.h`, default
+  address 0x27 — some backpacks use 0x3F). Shows a centered welcome intro for
+  `kLcdIntroMs`, then one row per channel (`COM1 230V 0.5A ON`), refreshed
+  every second; an OFF channel shows `COM1 000V 0.0A OFF`. If the text is invisible
+  with the backlight on, turn the contrast pot on the backpack.
 
 ## Toolchain
 
@@ -46,21 +52,52 @@ unused GPIOs on that specific board.
 ## Deployment
 
 1. Copy `include/config.example.h` to `include/config.h`, fill in your
-   WiFi credentials, Supabase URL/service key, and a `kDeviceId` UUID you
-   generate once (`python -c "import uuid; print(uuid.uuid4())"`).
-   `config.h` is gitignored — see **Security** below.
+   Supabase URL/service key and a `kDeviceId` UUID you generate once
+   (`python -c "import uuid; print(uuid.uuid4())"`). WiFi credentials are
+   *not* set here — see **WiFi provisioning** below. `config.h` is
+   gitignored — see **Security** below.
 2. Build and flash (from `esp32_firmware/`, with the board connected via
    USB):
    ```
    pio run -t upload
    ```
    PlatformIO fetches the ESP32 platform, the Arduino framework, and the
-   one dependency (`ArduinoJson`) automatically on first build.
-3. Watch the serial console for `WiFi connected: ...` and NTP sync
-   confirmation on first boot:
+   dependencies (`ArduinoJson`, `MycilaPZEM`, `WiFiManager`) automatically on
+   first build.
+3. Watch the serial console for the setup-portal prompt (first boot) or
+   `[WIFI] connected: ...` and the `[NTP] Success` line (subsequent boots):
    ```
    pio device monitor
    ```
+
+## WiFi provisioning
+
+WiFi credentials are never stored in firmware source or `config.h` — the
+device asks for them at runtime instead, using
+[WiFiManager](https://github.com/tzapu/WiFiManager):
+
+1. On first boot (or any boot where the last saved network can't be
+   reached), the device opens its own temporary WiFi network — by default
+   named `PowerGuard-Setup`, password `powerguard-setup` (both set by
+   `kWifiSetupApName`/`kWifiSetupApPassword` in `config.h`).
+2. From a phone or laptop, connect to that network, then open
+   `http://192.168.4.1` (most phones prompt automatically — a "captive
+   portal" login page).
+3. Pick your real WiFi network and enter its password. The device connects
+   and saves the credentials to its internal flash (NVS); the setup network
+   disappears once connected.
+4. On every boot after, the device reconnects using the saved credentials
+   automatically — no re-provisioning needed unless you move it to a
+   different network or `config.h`'s AP name/password changes.
+
+A temporary outage (router reboot, brief WiFi drop) is handled by the
+ESP32's own auto-reconnect and never reopens the portal. To move the
+device to a different network on purpose, type `wifireset` into
+`pio device monitor`'s serial console — this erases the saved network and
+reopens the setup portal immediately. Power-cycling the device after
+moving it (with the old network now unreachable) also reopens the portal,
+since the saved-network connect attempt is retried, and re-fails, once at
+every boot.
 
 ## Provisioning the PZEM meters (one-time, before wiring all 4 together)
 
@@ -101,10 +138,18 @@ committed anywhere (it's in `.gitignore`). If this ever moves beyond a
 personal setup, replace this with a scoped device credential (e.g. a
 restricted Postgres role or an Edge Function acting as a write proxy).
 
-`SupabaseClient` calls `WiFiClientSecure::setInsecure()`, so TLS is
-encrypted but the server certificate isn't validated (no CA bundle for
-Supabase is pinned). This matches the trust posture of the original
-firmware; pin a CA cert here before using this beyond a personal/lab setup.
+`SupabaseClient` validates Supabase's TLS certificate against the Mozilla
+root bundle built into the Arduino-ESP32 core, so the service key can't be
+read by someone impersonating the server on the WiFi path. Validation needs
+a correct clock, so cloud sync only starts once NTP has set the time (a
+failed handshake is logged with the mbedTLS error).
+
+The WiFi setup portal (see **WiFi provisioning**) is itself a WPA2-secured
+network (`kWifiSetupApPassword`, default `powerguard-setup` — change it in
+`config.h` before deploying), since anyone who can join it can point the
+device at a different WiFi network and, from there, at a different
+Supabase project. It's only up while unconfigured or after an explicit
+`wifireset`, not during normal operation.
 
 ## Documented assumptions / known limitations
 
@@ -116,25 +161,33 @@ firmware; pin a CA cert here before using this beyond a personal/lab setup.
   the breaker is open. If your PZEM is wired upstream instead, this
   heuristic won't work and `breaker_status` will stay `'OFF'` in the
   database until you address this separately.
-- **Schedules are UTC-only.** The ESP32 has no battery-backed RTC by
-  default, so firmware syncs time via NTP on boot (and hourly) and compares
-  `off_schedules.off_time`/`days` directly against UTC — no timezone
-  conversion. Enter schedule times in UTC in the app for now.
-- **No offline detection.** Firmware marks the device `online` on boot and
-  every heartbeat, but nothing currently flips it back to `offline` if the
-  device loses power or crashes — that would need a server-side staleness
-  check (e.g. a Supabase Edge Function/cron), which is not implemented yet.
-- **Single-core, cooperative loop.** `loop()` runs the safety checks (PZEM
-  polling, overcurrent/reset logic, local schedules) every ~100ms and folds
-  in a cloud-sync pass every `kLoopIntervalMs` (default 2s) on the same
-  core — it does not use FreeRTOS tasks across both cores. This mirrors the
-  original firmware's behavior (a single-threaded MicroPython event loop
-  where a blocking network call also stalls safety checks): a slow
-  Supabase request briefly delays the next safety poll. If that latency
-  becomes a problem, moving `runCloudSync()` to its own task pinned to the
-  second core (with a mutex around `channelState`) would decouple them.
-- Network calls are batched (one channel upload + one off-command poll,
-  one schedule refresh, and one heartbeat per `kLoopIntervalMs` tick) to
-  stay within the loop budget given the ESP32's TLS handshake overhead. If
-  you see the loop consistently running behind, raise `kLoopIntervalMs` in
-  `config.h`.
+- **Schedule time zone.** The ESP32 has no battery-backed RTC, so firmware
+  gets the time from NTP (nothing time-based runs until it has). The app
+  stores schedule times as plain local clock times, so set
+  `kUtcOffsetSeconds` in `config.h` to your timezone (e.g. `8 * 3600` for
+  UTC+8); it defaults to 0, which reads schedules as UTC. Schedules are
+  cached from the last successful fetch (refreshed every
+  `kScheduleRefreshMs`), so they keep firing while offline.
+- **Offline detection** is server-side, not firmware-side. Firmware only
+  ever writes `status = 'online'` (on boot and every heartbeat) — it has no
+  way to mark itself offline when it loses power or crashes. A `pg_cron`
+  job (`supabase/schema.sql` section 5 / migration
+  `20260907000000_offline_staleness.sql`) runs every 30s and flips any
+  device whose `last_seen` is older than 90s back to `offline`, so
+  `devices.status` in the database itself stays accurate, not just the
+  app's client-side computed `Device.isOnline`.
+- **Task layout.** Safety (`loop()`: PZEM readings, overcurrent/reset
+  logic, local schedules, relay pulses) never touches the network. All
+  WiFi/NTP/Supabase work runs on a separate `cloud` task; the two share
+  channel state behind a mutex and exchange off commands / off-log events
+  through queues, so a slow or dead connection can't delay a trip. Each
+  task is on the task watchdog (30s). A meter with no good read for 10s has
+  its live values cleared (its cumulative `energy` is kept so monthly
+  totals stay correct), and channels that have never answered are not
+  uploaded.
+- Off events are uploaded best-effort with a few retries; they are held in
+  RAM only, so an off-log row is lost if the device reboots before it could
+  be sent.
+- Cloud sync makes several HTTPS calls per `kLoopIntervalMs` tick (each a
+  fresh TLS handshake). If ticks consistently run late, raise
+  `kLoopIntervalMs` in `config.h`; this only slows uploads, not safety.

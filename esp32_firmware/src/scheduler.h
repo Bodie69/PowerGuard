@@ -13,11 +13,14 @@ struct ScheduleEntry {
 };
 
 // Caches off_schedules rows and reports which channels are due to turn off
-// right now (UTC, matched to the minute, de-duped so a schedule only fires
-// once per matching minute).
+// right now (device local time = UTC + config::kUtcOffsetSeconds, matched to
+// the minute, de-duped so a schedule only fires once per matching minute).
+// Reports nothing until the clock has been set by NTP.
+//
+// Not thread-safe: the caller serialises refresh() and dueChannels().
 class Scheduler {
   public:
-    void refresh(std::vector<ScheduleEntry> schedules) { _schedules = std::move(schedules); }
+    void refresh(std::vector<ScheduleEntry> schedules);
 
     std::vector<int> dueChannels();
 
